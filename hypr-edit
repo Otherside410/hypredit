@@ -35,9 +35,11 @@ class ColorPicker(QWidget):
 
         # Curseur blanc
         cursor_x = (self.current_hue / 360) * self.width()
+        cursor_y = self.height() // 2
+        cursor_r = max(4, self.height() // 3)
         painter.setPen(QPen(Qt.GlobalColor.white, 2))
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawEllipse(QPoint(int(cursor_x), 10), 7, 7)
+        painter.drawEllipse(QPoint(int(cursor_x), cursor_y), cursor_r, cursor_r)
 
     def mouseMoveEvent(self, event):
         self.update_color(event.pos())
@@ -62,8 +64,11 @@ class MiniEditor(QMainWindow):
         self.pixmap = QPixmap()
         self.pixmap.loadFromData(binary_data)
         
-        self.TB_HEIGHT = 70
-        self.setFixedSize(self.pixmap.width(), self.pixmap.height() + self.TB_HEIGHT)
+        self.compute_ui_metrics()
+        window_width = max(self.pixmap.width(), self.min_window_width)
+        self.setFixedSize(window_width, self.pixmap.height() + self.TB_HEIGHT)
+        self.image_offset_x = (window_width - self.pixmap.width()) // 2
+        self.image_rect = QRect(self.image_offset_x, self.TB_HEIGHT, self.pixmap.width(), self.pixmap.height())
 
         self.tool_colors = {
             "SELECT": QColor("#89b4fa"), "DRAW_RECT": QColor("#f38ba8"),
@@ -91,14 +96,14 @@ class MiniEditor(QMainWindow):
 
         # Layout horizontal pour les boutons et la palette
         self.layout = QHBoxLayout(self.toolbar_bg)
-        self.layout.setContentsMargins(20, 0, 20, 0)
-        self.layout.setSpacing(15)
+        self.layout.setContentsMargins(self.margin, 0, self.margin, 0)
+        self.layout.setSpacing(self.spacing)
         
         # Groupe Outils (Gauche)
         self.tool_buttons = {}
         for icon, mode in [("▭", "DRAW_RECT"), ("◯", "DRAW_CIRCLE"), ("▒", "OBFUSCATE"), ("󰏫", "HIGHLIGHT")]:
             btn = QPushButton(icon)
-            btn.setFixedSize(42, 42)
+            btn.setFixedSize(self.btn_size, self.btn_size)
             btn.clicked.connect(lambda checked, m=mode: self.set_mode(m))
             self.layout.addWidget(btn)
             self.tool_buttons[mode] = btn
@@ -107,18 +112,35 @@ class MiniEditor(QMainWindow):
 
         # LA PALETTE (Milieu)
         self.picker = ColorPicker()
+        self.picker.setFixedSize(self.picker_width, self.picker_height)
         self.picker.colorChanged.connect(self.change_tool_color)
         self.layout.addWidget(self.picker)
 
         self.layout.addStretch()
 
         # Groupe Actions (Droite)
-        for icon, func, color in [("󰆴", self.delete_selected, "#f38ba8"), ("󰄬", self.finish_and_copy, "#a6e3a1")]:
+        for icon, func, color in [("✕", self.close_window, "#f38ba8"), ("󰄬", self.finish_and_copy, "#a6e3a1")]:
             btn = QPushButton(icon)
-            btn.setFixedSize(42, 42)
-            btn.setStyleSheet(f"color: {color}; border-radius: 10px; font-size: 20px; background: #313244; border: none;")
+            btn.setFixedSize(self.btn_size, self.btn_size)
+            btn.setStyleSheet(
+                f"color: {color}; border-radius: {self.radius}px; font-size: {self.font_size}px; "
+                "background: #313244; border: none;"
+            )
             btn.clicked.connect(func)
             self.layout.addWidget(btn)
+
+    def compute_ui_metrics(self):
+        self.min_window_width = 400
+        min_dim = min(self.pixmap.width(), self.pixmap.height())
+        scale = max(0.7, min(1.4, min_dim / 900))
+        self.btn_size = int(42 * scale)
+        self.font_size = int(20 * scale)
+        self.radius = int(10 * scale)
+        self.margin = int(20 * scale)
+        self.spacing = int(15 * scale)
+        self.picker_width = int(200 * scale)
+        self.picker_height = int(20 * scale)
+        self.TB_HEIGHT = max(int(70 * scale), self.btn_size + int(20 * scale))
 
     def set_mode(self, mode):
         self.mode = mode
@@ -128,7 +150,8 @@ class MiniEditor(QMainWindow):
             border = f"1px solid {color}" if m == mode else "none"
             btn.setStyleSheet(
                 f"background-color: {bg}; color: {color}; border: {border}; "
-                "border-radius: 10px; font-size: 20px; padding: 0px; text-align: center;"
+                f"border-radius: {self.radius}px; font-size: {self.font_size}px; "
+                "padding: 0px; text-align: center;"
             )
         
         # Mettre à jour la palette pour l'outil sélectionné
@@ -149,6 +172,7 @@ class MiniEditor(QMainWindow):
 
     def mousePressEvent(self, event):
         if event.pos().y() < self.TB_HEIGHT: return
+        if not self.image_rect.contains(event.pos()): return
 
         if self.mode == "SELECT":
             self.selected_shape = None
@@ -170,7 +194,11 @@ class MiniEditor(QMainWindow):
                 self.selected_shape.rect.translate(delta)
                 self.drag_start_pos = event.pos()
             elif self.current_shape:
-                self.current_shape.rect.setBottomRight(event.pos())
+                clamped = QPoint(
+                    max(self.image_rect.left(), min(event.pos().x(), self.image_rect.right())),
+                    max(self.image_rect.top(), min(event.pos().y(), self.image_rect.bottom())),
+                )
+                self.current_shape.rect.setBottomRight(clamped)
             self.update()
 
     def paintEvent(self, event):
@@ -179,9 +207,9 @@ class MiniEditor(QMainWindow):
         canvas.fill(Qt.GlobalColor.transparent)
         canvas_painter = QPainter(canvas)
         canvas_painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        canvas_painter.drawPixmap(0, self.TB_HEIGHT, self.pixmap)
+        canvas_painter.drawPixmap(self.image_offset_x, self.TB_HEIGHT, self.pixmap)
 
-        image_rect = QRect(0, self.TB_HEIGHT, self.pixmap.width(), self.pixmap.height())
+        image_rect = self.image_rect
 
         for s in self.shapes:
             if s.kind == "OBFUSCATE":
@@ -232,12 +260,15 @@ class MiniEditor(QMainWindow):
             self.selected_shape = None
             self.update()
 
+    def close_window(self):
+        self.close()
+
     def finish_and_copy(self):
         self.selected_shape = None
         self.toolbar_bg.hide()
         self.update()
         QApplication.processEvents()
-        final_rect = QRect(0, self.TB_HEIGHT, self.pixmap.width(), self.pixmap.height())
+        final_rect = QRect(self.image_offset_x, self.TB_HEIGHT, self.pixmap.width(), self.pixmap.height())
         screenshot = self.grab(final_rect)
         buffer = QBuffer()
         buffer.open(QIODevice.OpenModeFlag.WriteOnly)
