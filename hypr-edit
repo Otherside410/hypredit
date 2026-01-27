@@ -2,7 +2,7 @@
 import sys
 import subprocess
 from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QHBoxLayout, QPushButton, QFrame, QVBoxLayout
-from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QBrush, QFont, QLinearGradient
+from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QBrush, QFont, QLinearGradient, QKeySequence
 from PyQt6.QtCore import Qt, QPoint, QRect, QBuffer, QIODevice, pyqtSignal
 
 class Shape:
@@ -57,6 +57,7 @@ class MiniEditor(QMainWindow):
         super().__init__()
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         self.pixmap = QPixmap()
         self.pixmap.loadFromData(binary_data)
@@ -95,7 +96,7 @@ class MiniEditor(QMainWindow):
         
         # Groupe Outils (Gauche)
         self.tool_buttons = {}
-        for icon, mode in [("󰆏", "SELECT"), ("󰇙", "DRAW_RECT"), ("󰄯", "DRAW_CIRCLE"), ("󰝟", "OBFUSCATE"), ("󰏫", "HIGHLIGHT")]:
+        for icon, mode in [("▭", "DRAW_RECT"), ("◯", "DRAW_CIRCLE"), ("▒", "OBFUSCATE"), ("󰏫", "HIGHLIGHT")]:
             btn = QPushButton(icon)
             btn.setFixedSize(42, 42)
             btn.clicked.connect(lambda checked, m=mode: self.set_mode(m))
@@ -125,7 +126,10 @@ class MiniEditor(QMainWindow):
             color = self.tool_colors[m].name()
             bg = "#313244" if m == mode else "transparent"
             border = f"1px solid {color}" if m == mode else "none"
-            btn.setStyleSheet(f"background-color: {bg}; color: {color}; border: {border}; border-radius: 10px; font-size: 20px;")
+            btn.setStyleSheet(
+                f"background-color: {bg}; color: {color}; border: {border}; "
+                "border-radius: 10px; font-size: 20px; padding: 0px; text-align: center;"
+            )
         
         # Mettre à jour la palette pour l'outil sélectionné
         h, s, v, a = self.tool_colors[self.mode].getHsv()
@@ -170,28 +174,57 @@ class MiniEditor(QMainWindow):
             self.update()
 
     def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.drawPixmap(0, self.TB_HEIGHT, self.pixmap)
+        # Compose everything offscreen so obfuscation affects prior shapes too.
+        canvas = QPixmap(self.size())
+        canvas.fill(Qt.GlobalColor.transparent)
+        canvas_painter = QPainter(canvas)
+        canvas_painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        canvas_painter.drawPixmap(0, self.TB_HEIGHT, self.pixmap)
+
+        image_rect = QRect(0, self.TB_HEIGHT, self.pixmap.width(), self.pixmap.height())
 
         for s in self.shapes:
             if s.kind == "OBFUSCATE":
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(QBrush(QColor(26, 26, 26)))
-                painter.drawRect(s.rect)
+                # Pixelate the current composed content (image + prior shapes).
+                target_rect = s.rect.intersected(image_rect)
+                if not target_rect.isEmpty():
+                    region = canvas.copy(target_rect)
+                    # Fixed pixel size for consistent obfuscation strength.
+                    pixel = 4
+                    small = region.scaled(
+                        max(1, region.width() // pixel),
+                        max(1, region.height() // pixel),
+                        Qt.AspectRatioMode.IgnoreAspectRatio,
+                        Qt.TransformationMode.FastTransformation,
+                    )
+                    pixelated = small.scaled(
+                        region.width(),
+                        region.height(),
+                        Qt.AspectRatioMode.IgnoreAspectRatio,
+                        Qt.TransformationMode.FastTransformation,
+                    )
+                    canvas_painter.drawPixmap(target_rect.topLeft(), pixelated)
             elif s.kind == "HIGHLIGHT":
-                painter.setBrush(QBrush(s.color))
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.drawRect(s.rect)
+                canvas_painter.setBrush(QBrush(s.color))
+                canvas_painter.setPen(Qt.PenStyle.NoPen)
+                canvas_painter.drawRect(s.rect)
             else:
-                painter.setPen(QPen(s.color, 3))
-                painter.setBrush(Qt.BrushStyle.NoBrush)
-                if s.kind == "DRAW_CIRCLE": painter.drawEllipse(s.rect)
-                else: painter.drawRect(s.rect)
+                canvas_painter.setPen(QPen(s.color, 3))
+                canvas_painter.setBrush(Qt.BrushStyle.NoBrush)
+                if s.kind == "DRAW_CIRCLE":
+                    canvas_painter.drawEllipse(s.rect)
+                else:
+                    canvas_painter.drawRect(s.rect)
 
-            if s == self.selected_shape:
-                painter.setPen(QPen(QColor(255, 255, 255, 180), 1, Qt.PenStyle.DashLine))
-                painter.drawRect(s.rect.adjusted(-2, -2, 2, 2))
+        canvas_painter.end()
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.drawPixmap(0, 0, canvas)
+
+        if self.selected_shape:
+            painter.setPen(QPen(QColor(255, 255, 255, 180), 1, Qt.PenStyle.DashLine))
+            painter.drawRect(self.selected_shape.rect.adjusted(-2, -2, 2, 2))
 
     def delete_selected(self):
         if self.selected_shape:
@@ -211,6 +244,20 @@ class MiniEditor(QMainWindow):
         screenshot.save(buffer, "PNG")
         subprocess.run(["wl-copy", "--type", "image/png"], input=buffer.data().data(), check=True)
         self.close()
+
+    def keyPressEvent(self, event):
+        if event.matches(QKeySequence.StandardKey.Copy) or (
+            event.modifiers() & Qt.KeyboardModifier.ControlModifier
+            and event.key() == Qt.Key.Key_C
+        ):
+            self.finish_and_copy()
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 if __name__ == "__main__":
     input_data = sys.stdin.buffer.read()
