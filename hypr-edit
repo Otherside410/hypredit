@@ -1,0 +1,222 @@
+#!/usr/bin/env python3
+import sys
+import subprocess
+from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QHBoxLayout, QPushButton, QFrame, QVBoxLayout
+from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QBrush, QFont, QLinearGradient
+from PyQt6.QtCore import Qt, QPoint, QRect, QBuffer, QIODevice, pyqtSignal
+
+class Shape:
+    def __init__(self, rect, kind, color):
+        self.rect = rect
+        self.kind = kind
+        self.color = color
+
+# --- LE NOUVEAU WIDGET DE PALETTE ---
+class ColorPicker(QWidget):
+    colorChanged = pyqtSignal(QColor)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(200, 20)
+        self.current_hue = 0
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Dessin du dégradé Arc-en-ciel
+        gradient = QLinearGradient(0, 0, self.width(), 0)
+        for i in range(0, 360, 10):
+            gradient.setColorAt(i/360, QColor.fromHsv(i, 200, 255))
+        
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(gradient))
+        painter.drawRoundedRect(self.rect(), 10, 10)
+
+        # Curseur blanc
+        cursor_x = (self.current_hue / 360) * self.width()
+        painter.setPen(QPen(Qt.GlobalColor.white, 2))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(QPoint(int(cursor_x), 10), 7, 7)
+
+    def mouseMoveEvent(self, event):
+        self.update_color(event.pos())
+
+    def mousePressEvent(self, event):
+        self.update_color(event.pos())
+
+    def update_color(self, pos):
+        hue = max(0, min(359, int((pos.x() / self.width()) * 359)))
+        self.current_hue = hue
+        self.colorChanged.emit(QColor.fromHsv(hue, 200, 255))
+        self.update()
+
+# --- L'ÉDITEUR PRINCIPAL ---
+class MiniEditor(QMainWindow):
+    def __init__(self, binary_data):
+        super().__init__()
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+        self.pixmap = QPixmap()
+        self.pixmap.loadFromData(binary_data)
+        
+        self.TB_HEIGHT = 70
+        self.setFixedSize(self.pixmap.width(), self.pixmap.height() + self.TB_HEIGHT)
+
+        self.tool_colors = {
+            "SELECT": QColor("#89b4fa"), "DRAW_RECT": QColor("#f38ba8"),
+            "DRAW_CIRCLE": QColor("#fab387"), "OBFUSCATE": QColor("#585b70"),
+            "HIGHLIGHT": QColor("#f9e2af")
+        }
+
+        self.shapes = []        
+        self.current_shape = None
+        self.selected_shape = None
+        self.mode = "DRAW_RECT"
+        self.drag_start_pos = None
+
+        self.init_ui()
+        self.set_mode("DRAW_RECT")
+
+    def init_ui(self):
+        self.main_container = QWidget(self)
+        self.main_container.setFixedSize(self.size())
+        
+        # BARRE D'OUTILS (QFrame pour le style)
+        self.toolbar_bg = QFrame(self.main_container)
+        self.toolbar_bg.setGeometry(0, 0, self.width(), self.TB_HEIGHT)
+        self.toolbar_bg.setStyleSheet("background-color: #11111b; border-bottom: 1px solid #313244;")
+
+        # Layout horizontal pour les boutons et la palette
+        self.layout = QHBoxLayout(self.toolbar_bg)
+        self.layout.setContentsMargins(20, 0, 20, 0)
+        self.layout.setSpacing(15)
+        
+        # Groupe Outils (Gauche)
+        self.tool_buttons = {}
+        for icon, mode in [("󰆏", "SELECT"), ("󰇙", "DRAW_RECT"), ("󰄯", "DRAW_CIRCLE"), ("󰝟", "OBFUSCATE"), ("󰏫", "HIGHLIGHT")]:
+            btn = QPushButton(icon)
+            btn.setFixedSize(42, 42)
+            btn.clicked.connect(lambda checked, m=mode: self.set_mode(m))
+            self.layout.addWidget(btn)
+            self.tool_buttons[mode] = btn
+
+        self.layout.addStretch()
+
+        # LA PALETTE (Milieu)
+        self.picker = ColorPicker()
+        self.picker.colorChanged.connect(self.change_tool_color)
+        self.layout.addWidget(self.picker)
+
+        self.layout.addStretch()
+
+        # Groupe Actions (Droite)
+        for icon, func, color in [("󰆴", self.delete_selected, "#f38ba8"), ("󰄬", self.finish_and_copy, "#a6e3a1")]:
+            btn = QPushButton(icon)
+            btn.setFixedSize(42, 42)
+            btn.setStyleSheet(f"color: {color}; border-radius: 10px; font-size: 20px; background: #313244; border: none;")
+            btn.clicked.connect(func)
+            self.layout.addWidget(btn)
+
+    def set_mode(self, mode):
+        self.mode = mode
+        for m, btn in self.tool_buttons.items():
+            color = self.tool_colors[m].name()
+            bg = "#313244" if m == mode else "transparent"
+            border = f"1px solid {color}" if m == mode else "none"
+            btn.setStyleSheet(f"background-color: {bg}; color: {color}; border: {border}; border-radius: 10px; font-size: 20px;")
+        
+        # Mettre à jour la palette pour l'outil sélectionné
+        h, s, v, a = self.tool_colors[self.mode].getHsv()
+        if h != -1: self.picker.current_hue = h
+        self.picker.update()
+
+    def change_tool_color(self, color):
+        if self.mode != "OBFUSCATE":
+            # On garde l'alpha si c'est le highlight
+            if self.mode == "HIGHLIGHT": color.setAlpha(120)
+            
+            self.tool_colors[self.mode] = color
+            if self.selected_shape:
+                self.selected_shape.color = color
+            self.set_mode(self.mode) # Refresh les couleurs des boutons
+            self.update()
+
+    def mousePressEvent(self, event):
+        if event.pos().y() < self.TB_HEIGHT: return
+
+        if self.mode == "SELECT":
+            self.selected_shape = None
+            for s in reversed(self.shapes):
+                if s.rect.contains(event.pos()):
+                    self.selected_shape = s
+                    self.drag_start_pos = event.pos()
+                    break
+        else:
+            color = QColor(self.tool_colors[self.mode])
+            self.current_shape = Shape(QRect(event.pos(), event.pos()), self.mode, color)
+            self.shapes.append(self.current_shape)
+        self.update()
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            if self.mode == "SELECT" and self.selected_shape:
+                delta = event.pos() - self.drag_start_pos
+                self.selected_shape.rect.translate(delta)
+                self.drag_start_pos = event.pos()
+            elif self.current_shape:
+                self.current_shape.rect.setBottomRight(event.pos())
+            self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.drawPixmap(0, self.TB_HEIGHT, self.pixmap)
+
+        for s in self.shapes:
+            if s.kind == "OBFUSCATE":
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QBrush(QColor(26, 26, 26)))
+                painter.drawRect(s.rect)
+            elif s.kind == "HIGHLIGHT":
+                painter.setBrush(QBrush(s.color))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawRect(s.rect)
+            else:
+                painter.setPen(QPen(s.color, 3))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                if s.kind == "DRAW_CIRCLE": painter.drawEllipse(s.rect)
+                else: painter.drawRect(s.rect)
+
+            if s == self.selected_shape:
+                painter.setPen(QPen(QColor(255, 255, 255, 180), 1, Qt.PenStyle.DashLine))
+                painter.drawRect(s.rect.adjusted(-2, -2, 2, 2))
+
+    def delete_selected(self):
+        if self.selected_shape:
+            self.shapes.remove(self.selected_shape)
+            self.selected_shape = None
+            self.update()
+
+    def finish_and_copy(self):
+        self.selected_shape = None
+        self.toolbar_bg.hide()
+        self.update()
+        QApplication.processEvents()
+        final_rect = QRect(0, self.TB_HEIGHT, self.pixmap.width(), self.pixmap.height())
+        screenshot = self.grab(final_rect)
+        buffer = QBuffer()
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        screenshot.save(buffer, "PNG")
+        subprocess.run(["wl-copy", "--type", "image/png"], input=buffer.data().data(), check=True)
+        self.close()
+
+if __name__ == "__main__":
+    input_data = sys.stdin.buffer.read()
+    if not input_data: sys.exit(0)
+    app = QApplication(sys.argv)
+    app.setFont(QFont("JetBrainsMono Nerd Font", 10))
+    editor = MiniEditor(input_data)
+    editor.show()
+    sys.exit(app.exec())
