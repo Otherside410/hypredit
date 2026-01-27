@@ -24,6 +24,8 @@ Make sure you have the following tools installed on your system:
 *   `grim`: For screenshots.
 *   `slurp`: For selecting the screen area.
 *   `wl-clipboard`: For clipboard management.
+*   `hyprland`: Window manager / compositor.
+*   `hyprshot`: Screenshot tool for Hyprland.
 
 ### Python & UI
 *   `Python 3`
@@ -46,6 +48,6 @@ Make sure you have the following tools installed on your system:
 To use the tool with a keyboard shortcut, add the following line to your `~/.config/hypr/hyprland.conf` file:
 
 ```ini
-# Example with SUPER + SHIFT + S
-bind =  $ mainMod SHIFT, S, exec, grim -g " $ (slurp)" - | /path/to/your/script.py
+# Example with SUPER + Print
+bind = $mainMod, Print, exec, hyprshot -m region --raw | hypr-edit
 ```
