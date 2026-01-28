@@ -284,6 +284,22 @@ class MiniEditor(QMainWindow):
             self.finish_and_copy()
             event.accept()
             return
+        if event.key() == Qt.Key.Key_R:
+            self.set_mode("DRAW_RECT")
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_C and event.modifiers() == Qt.KeyboardModifier.NoModifier:
+            self.set_mode("DRAW_CIRCLE")
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_O:
+            self.set_mode("OBFUSCATE")
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_H:
+            self.set_mode("HIGHLIGHT")
+            event.accept()
+            return
         if event.key() == Qt.Key.Key_Escape:
             self.close()
             event.accept()
