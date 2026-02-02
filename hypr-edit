@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 import sys
 import subprocess
-from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QHBoxLayout, QPushButton, QFrame, QVBoxLayout
+from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QHBoxLayout, QPushButton, QFrame, QVBoxLayout, QSlider, QStackedWidget
 from PyQt6.QtGui import QPixmap, QPainter, QPen, QColor, QBrush, QFont, QLinearGradient, QKeySequence
 from PyQt6.QtCore import Qt, QPoint, QRect, QBuffer, QIODevice, pyqtSignal
 
 class Shape:
-    def __init__(self, rect, kind, color):
+    def __init__(self, rect, kind, color, label=None, strength=None):
         self.rect = rect
         self.kind = kind
         self.color = color
+        self.label = label
+        self.strength = strength
 
 # --- LE NOUVEAU WIDGET DE PALETTE ---
 class ColorPicker(QWidget):
@@ -71,9 +73,9 @@ class MiniEditor(QMainWindow):
         self.image_rect = QRect(self.image_offset_x, self.TB_HEIGHT, self.pixmap.width(), self.pixmap.height())
 
         self.tool_colors = {
-            "SELECT": QColor("#89b4fa"), "DRAW_RECT": QColor("#f38ba8"),
-            "DRAW_CIRCLE": QColor("#fab387"), "OBFUSCATE": QColor("#585b70"),
-            "HIGHLIGHT": QColor("#f9e2af")
+            "SELECT": QColor("#f38ba8"), "DRAW_RECT": QColor("#f38ba8"),
+            "DRAW_CIRCLE": QColor("#f38ba8"), "OBFUSCATE": QColor("#585b70"),
+            "HIGHLIGHT": QColor("#f38ba8"), "INDEX": QColor("#f38ba8")
         }
 
         self.shapes = []        
@@ -81,6 +83,8 @@ class MiniEditor(QMainWindow):
         self.selected_shape = None
         self.mode = "DRAW_RECT"
         self.drag_start_pos = None
+        self.index_counter = 1
+        self.obfuscation_strength = 4
 
         self.init_ui()
         self.set_mode("DRAW_RECT")
@@ -111,10 +115,22 @@ class MiniEditor(QMainWindow):
         self.layout.addStretch()
 
         # LA PALETTE (Milieu)
+        self.picker_stack = QStackedWidget()
+        self.picker_stack.setFixedSize(self.picker_width, self.picker_height)
+
         self.picker = ColorPicker()
         self.picker.setFixedSize(self.picker_width, self.picker_height)
         self.picker.colorChanged.connect(self.change_tool_color)
-        self.layout.addWidget(self.picker)
+
+        self.obfuscation_slider = QSlider(Qt.Orientation.Horizontal)
+        self.obfuscation_slider.setFixedSize(self.picker_width, self.picker_height)
+        self.obfuscation_slider.setRange(2, 16)
+        self.obfuscation_slider.setValue(self.obfuscation_strength)
+        self.obfuscation_slider.valueChanged.connect(self.change_obfuscation_strength)
+
+        self.picker_stack.addWidget(self.picker)
+        self.picker_stack.addWidget(self.obfuscation_slider)
+        self.layout.addWidget(self.picker_stack)
 
         self.layout.addStretch()
 
@@ -144,6 +160,14 @@ class MiniEditor(QMainWindow):
 
     def set_mode(self, mode):
         self.mode = mode
+        if mode == "INDEX":
+            # Index mode should not alter existing shapes.
+            self.current_shape = None
+            self.selected_shape = None
+        if mode == "OBFUSCATE":
+            self.picker_stack.setCurrentWidget(self.obfuscation_slider)
+        else:
+            self.picker_stack.setCurrentWidget(self.picker)
         for m, btn in self.tool_buttons.items():
             color = self.tool_colors[m].name()
             bg = "#313244" if m == mode else "transparent"
@@ -170,11 +194,23 @@ class MiniEditor(QMainWindow):
             self.set_mode(self.mode) # Refresh les couleurs des boutons
             self.update()
 
+    def change_obfuscation_strength(self, value):
+        self.obfuscation_strength = value
+        self.update()
+
     def mousePressEvent(self, event):
         if event.pos().y() < self.TB_HEIGHT: return
         if not self.image_rect.contains(event.pos()): return
 
-        if self.mode == "SELECT":
+        if self.mode == "INDEX":
+            radius = 16
+            center_x = max(self.image_rect.left() + radius, min(event.pos().x(), self.image_rect.right() - radius))
+            center_y = max(self.image_rect.top() + radius, min(event.pos().y(), self.image_rect.bottom() - radius))
+            rect = QRect(center_x - radius, center_y - radius, radius * 2, radius * 2)
+            color = QColor(self.tool_colors[self.mode])
+            self.shapes.append(Shape(rect, "INDEX", color, str(self.index_counter)))
+            self.index_counter += 1
+        elif self.mode == "SELECT":
             self.selected_shape = None
             for s in reversed(self.shapes):
                 if s.rect.contains(event.pos()):
@@ -183,12 +219,15 @@ class MiniEditor(QMainWindow):
                     break
         else:
             color = QColor(self.tool_colors[self.mode])
-            self.current_shape = Shape(QRect(event.pos(), event.pos()), self.mode, color)
+            strength = self.obfuscation_strength if self.mode == "OBFUSCATE" else None
+            self.current_shape = Shape(QRect(event.pos(), event.pos()), self.mode, color, strength=strength)
             self.shapes.append(self.current_shape)
         self.update()
 
     def mouseMoveEvent(self, event):
         if event.buttons() & Qt.MouseButton.LeftButton:
+            if self.mode == "INDEX":
+                return
             if self.mode == "SELECT" and self.selected_shape:
                 delta = event.pos() - self.drag_start_pos
                 self.selected_shape.rect.translate(delta)
@@ -218,7 +257,7 @@ class MiniEditor(QMainWindow):
                 if not target_rect.isEmpty():
                     region = canvas.copy(target_rect)
                     # Fixed pixel size for consistent obfuscation strength.
-                    pixel = 4
+                    pixel = s.strength if s.strength is not None else self.obfuscation_strength
                     small = region.scaled(
                         max(1, region.width() // pixel),
                         max(1, region.height() // pixel),
@@ -236,6 +275,15 @@ class MiniEditor(QMainWindow):
                 canvas_painter.setBrush(QBrush(s.color))
                 canvas_painter.setPen(Qt.PenStyle.NoPen)
                 canvas_painter.drawRect(s.rect)
+            elif s.kind == "INDEX":
+                canvas_painter.setBrush(QBrush(s.color))
+                canvas_painter.setPen(Qt.PenStyle.NoPen)
+                canvas_painter.drawEllipse(s.rect)
+                font = QFont(self.font().family(), max(8, int(s.rect.height() * 0.6)))
+                font.setBold(True)
+                canvas_painter.setFont(font)
+                canvas_painter.setPen(QPen(Qt.GlobalColor.white))
+                canvas_painter.drawText(s.rect, Qt.AlignmentFlag.AlignCenter, s.label or "")
             else:
                 canvas_painter.setPen(QPen(s.color, 3))
                 canvas_painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -290,6 +338,10 @@ class MiniEditor(QMainWindow):
             return
         if event.key() == Qt.Key.Key_C and event.modifiers() == Qt.KeyboardModifier.NoModifier:
             self.set_mode("DRAW_CIRCLE")
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_I and event.modifiers() == Qt.KeyboardModifier.NoModifier:
+            self.set_mode("INDEX")
             event.accept()
             return
         if event.key() == Qt.Key.Key_O:
